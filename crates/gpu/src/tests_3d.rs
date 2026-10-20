@@ -329,3 +329,28 @@ fn two_d_layer_with_a_three_d_track_matte() {
         }
     }
 }
+
+/// #1812: workers that miss the same atlas together (a cold start, or after an out-of-memory
+/// error cleared the atlases) build it once: the others wait for it instead of each allocating a
+/// copy.
+#[test]
+fn concurrent_misses_of_one_atlas_build_it_once() {
+    let Some(g) = gpu() else { return };
+    let s = crossing(BitDepth::Bpc32, BlendMode::Normal);
+    let r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+    let ctx = r.eval_ctx(s.cid, Tick::ZERO).unwrap();
+    let run: Vec<_> = r.visible_layers(&ctx).into_iter().filter(|l| l.is_3d()).collect();
+    let prep = r.prepare_3d_run(&ctx, &run, (W, H)).unwrap();
+    let bufs: Vec<_> = prep.planes.iter().map(|p| p.buf.clone()).collect();
+    let c = g.context();
+    let Err(Some(claim)) = c.atlas_or_claim(&bufs) else { panic!("the first miss builds it") };
+    let waited = std::thread::scope(|sc| {
+        let h = sc.spawn(|| c.atlas_or_claim(&bufs).ok().map(|(a, _)| a.texture));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let atlas = c.image(8, 8);
+        c.keep_atlas(&bufs, atlas.clone(), vec![(0, 0); bufs.len()]);
+        drop(claim);
+        (h.join().unwrap(), atlas.texture)
+    });
+    assert_eq!(waited.0, Some(waited.1), "the waiter gets the atlas the first one built");
+}

@@ -131,9 +131,14 @@ const LIGHT_BYTES: usize = 6 * 16;
 fn atlas(e: &mut Enc, run: &Run3d) -> Option<(GpuImage, Vec<(u32, u32)>, Vec<(u32, u32, [f64; 2])>)> {
     let keep = run.planes.iter().all(|p| p.dof.is_none());
     let bufs: Vec<_> = run.planes.iter().map(|p| p.buf.clone()).collect();
-    if keep && let Some((atlas, pos)) = e.g.cached_atlas(&bufs) {
-        return Some((atlas, pos, run.planes.iter().map(|p| (p.buf.img.width.max(1), p.buf.img.height.max(1), p.buf.offset)).collect()));
-    }
+    // Held until the atlas is kept: other workers drawing these buffers wait for it.
+    let _claim = match keep.then(|| e.g.atlas_or_claim(&bufs)) {
+        Some(Ok((atlas, pos))) => {
+            return Some((atlas, pos, run.planes.iter().map(|p| (p.buf.img.width.max(1), p.buf.img.height.max(1), p.buf.offset)).collect()));
+        }
+        Some(Err(claim)) => claim,
+        None => None,
+    };
     let mut texs: Vec<(GpuImage, [f64; 2])> = Vec::with_capacity(run.planes.len());
     for p in &run.planes {
         let up = e.g.upload_buf(&p.buf)?;
