@@ -268,6 +268,34 @@ fn a_camera_moving_any_way_renders_every_frame_as_the_whole_layer() {
     moving("text turning near the camera", &[(0.0, [cx, cy, z])], &still, &[(0.0, [cx, cy, z + 70.0])], &[(0.0, -70.0), (1.0, 70.0)]);
 }
 
+/// Reads of a layer in its own space get the whole layer, not the part the frame shows: an effect
+/// taking another layer as a parameter (Set Matte, stretched to fit, from hidden text close to the
+/// camera), and the source the motion tracker analyses.
+#[test]
+fn layer_space_reads_get_the_whole_layer() {
+    let (mut p, cid, comp) = setup();
+    let mut text = text3(&mut p, &comp, [W as f64 / 2.0, H as f64 / 2.0, -zoom() + 40.0], 0.0);
+    text.switches.video = false;
+    let text_id = text.id;
+    let sid =
+        p.add_item("Solid", Label::Red, None, ItemKind::Solid(effectcraft_project::Solid { color: [0.2, 0.6, 1.0], width: W, height: H, pixel_aspect: 1.0 }));
+    let mut solid = build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: sid }, (W, H), None);
+    let spec = effectcraft_effects::find("ec.channel.setmatte").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [W as f64, H as f64]);
+    p.next_id = next;
+    g.prop_mut("takeMatteFromLayer").unwrap().value = Value::Layer(Some(text_id.0));
+    solid.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(cid).unwrap().layers = vec![text, solid];
+    assert_eq!(frame(&p, cid, false).data, frame(&p, cid, true).data, "Set Matte from the text");
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+    let layer = &p.comp(cid).unwrap().layers[0];
+    let mut whole = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    whole.whole_raster = true;
+    assert_eq!(r.layer_source(&ctx, layer).unwrap().img, whole.layer_source(&ctx, layer).unwrap().img, "the tracker's source");
+}
+
 /// A layer whose pixels outside the frame can matter (an effect here) is rasterised whole.
 #[test]
 fn layers_with_effects_rasterise_whole() {

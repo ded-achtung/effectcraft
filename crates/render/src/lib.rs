@@ -766,6 +766,9 @@ impl<'a> Renderer<'a> {
             top: false,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            // Effects read other layers through it in layer space (layer parameters, Echo…):
+            // they need the whole layer, not the part this frame shows (see `raster_clip`).
+            whole_raster: true,
             ..*self
         }
     }
@@ -1573,7 +1576,8 @@ impl<'a> Renderer<'a> {
     /// (what the motion tracker analyses, like After Effects' Layer panel). `None` for layers
     /// without pixels.
     pub fn layer_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
-        self.source(ctx, layer)
+        // The whole layer, not the part the frame shows (see `raster_clip`).
+        Renderer { whole_raster: true, ..*self }.source(ctx, layer)
     }
 
     /// Layer pixels after source → masks → effects (no layer styles).
