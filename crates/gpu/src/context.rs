@@ -1010,6 +1010,12 @@ impl GpuContext {
         Some(g)
     }
 
+    /// Classic 3D atlases kept.
+    #[cfg(test)]
+    pub(crate) fn atlas_entries(&self) -> usize {
+        self.atlases.lock().map(|a| a.len()).unwrap_or_default()
+    }
+
     /// Entries in the layer upload cache.
     #[cfg(test)]
     pub(crate) fn upload_entries(&self) -> usize {
@@ -1066,8 +1072,11 @@ impl GpuContext {
     }
 
     /// The atlas kept for exactly these layer buffers (in this order), with their positions.
+    /// Atlases of freed buffers are dropped here (every Classic 3D draw looks), so they don't
+    /// hold video memory until the next atlas is kept.
     pub(crate) fn cached_atlas(&self, bufs: &[Arc<Buf>]) -> Option<(GpuImage, Vec<(u32, u32)>)> {
         let mut a = self.atlases.lock().ok()?;
+        a.retain(|x| x.bufs.iter().all(|w| w.strong_count() > 0));
         let clock = a.iter().map(|x| x.last_use).max().unwrap_or(0) + 1;
         let hit = a.iter_mut().find(|x| x.bufs.len() == bufs.len() && x.bufs.iter().zip(bufs).all(|(w, b)| w.upgrade().is_some_and(|w| Arc::ptr_eq(&w, b))))?;
         hit.last_use = clock;
@@ -1085,6 +1094,10 @@ impl GpuContext {
         }
         let Ok(mut a) = self.atlases.lock() else { return };
         a.retain(|x| x.bufs.iter().all(|w| w.strong_count() > 0));
+        // Workers that missed at once each built one: keep the first, not two copies.
+        if a.iter().any(|x| x.bufs.len() == bufs.len() && x.bufs.iter().zip(bufs).all(|(w, b)| w.upgrade().is_some_and(|w| Arc::ptr_eq(&w, b)))) {
+            return;
+        }
         let last_use = a.iter().map(|x| x.last_use).max().unwrap_or(0) + 1;
         while a.len() >= ATLASES {
             let Some(i) = a.iter().enumerate().min_by_key(|(_, x)| x.last_use).map(|(i, _)| i) else { break };

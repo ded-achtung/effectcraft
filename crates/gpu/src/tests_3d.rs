@@ -250,6 +250,14 @@ fn classic_3d_atlases_are_kept_for_the_same_layer_buffers() {
     assert!(g.context().cached_atlas(&other).is_none());
     assert_eq!(draw(&changed), first);
     assert!(g.context().cached_atlas(&other).is_some());
+    // Keeping one again (workers that missed at once) adds no copy.
+    let n = g.context().atlas_entries();
+    g.context().keep_atlas(&other, atlas.clone(), vec![(0, 0); other.len()]);
+    assert_eq!(g.context().atlas_entries(), n, "no duplicate entry");
+    // Once its buffers are freed, the next lookup drops it.
+    drop((changed, other));
+    assert!(g.context().cached_atlas(&bufs).is_some());
+    assert_eq!(g.context().atlas_entries(), 1, "the atlas of freed buffers is gone");
 }
 
 /// Classic 3D bokeh depth of field runs on the GPU: iris shapes, highlights, fringe, Fast
