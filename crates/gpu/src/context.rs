@@ -345,6 +345,17 @@ struct Uploads {
     clock: u64,
 }
 
+/// Classic 3D plane atlases kept for the next frames (see [`GpuContext::cached_atlas`]).
+const ATLASES: usize = 2;
+
+/// A Classic 3D atlas of layer buffers, with each buffer's position in it.
+struct Atlas {
+    bufs: Vec<Weak<Buf>>,
+    img: GpuImage,
+    pos: Vec<(u32, u32)>,
+    last_use: u64,
+}
+
 /// The device and everything compiled for it.
 pub struct GpuContext {
     pub device: wgpu::Device,
@@ -364,6 +375,7 @@ pub struct GpuContext {
     dummy_tex: wgpu::TextureView,
     dummy_buf: wgpu::Buffer,
     uploads: Mutex<Uploads>,
+    atlases: Mutex<Vec<Atlas>>,
     upload_budget: std::sync::atomic::AtomicUsize,
     upload_full_warned: std::sync::atomic::AtomicBool,
     pool: Arc<Mutex<Pool>>,
@@ -711,6 +723,7 @@ impl GpuContext {
             dummy,
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
+            atlases: Mutex::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
             pool: Default::default(),
@@ -1052,11 +1065,42 @@ impl GpuContext {
         Some(img)
     }
 
+    /// The atlas kept for exactly these layer buffers (in this order), with their positions.
+    pub(crate) fn cached_atlas(&self, bufs: &[Arc<Buf>]) -> Option<(GpuImage, Vec<(u32, u32)>)> {
+        let mut a = self.atlases.lock().ok()?;
+        let clock = a.iter().map(|x| x.last_use).max().unwrap_or(0) + 1;
+        let hit = a.iter_mut().find(|x| x.bufs.len() == bufs.len() && x.bufs.iter().zip(bufs).all(|(w, b)| w.upgrade().is_some_and(|w| Arc::ptr_eq(&w, b))))?;
+        hit.last_use = clock;
+        Some((hit.img.clone(), hit.pos.clone()))
+    }
+
+    /// Keep an atlas built from `bufs` for the next frames: a Classic 3D run whose layers don't
+    /// change (cached layer buffers) then neither allocates nor fills one per frame. Frame
+    /// workers render in parallel, and one atlas each ran the GPU out of memory (#1812). Only
+    /// atlases within half the upload budget are kept, at most [`ATLASES`]; the least recently
+    /// used, and those of freed buffers, go first. `img` must be filled by submitted work.
+    pub(crate) fn keep_atlas(&self, bufs: &[Arc<Buf>], img: GpuImage, pos: Vec<(u32, u32)>) {
+        if img.width as usize * img.height as usize * 16 > self.upload_budget() / 2 {
+            return;
+        }
+        let Ok(mut a) = self.atlases.lock() else { return };
+        a.retain(|x| x.bufs.iter().all(|w| w.strong_count() > 0));
+        let last_use = a.iter().map(|x| x.last_use).max().unwrap_or(0) + 1;
+        while a.len() >= ATLASES {
+            let Some(i) = a.iter().enumerate().min_by_key(|(_, x)| x.last_use).map(|(i, _)| i) else { break };
+            a.swap_remove(i);
+        }
+        a.push(Atlas { bufs: bufs.iter().map(Arc::downgrade).collect(), img, pos, last_use });
+    }
+
     /// Forget uploaded layer textures.
     pub fn clear_uploads(&self) {
         if let Ok(mut u) = self.uploads.lock() {
             u.map.clear();
             u.bytes = 0;
+        }
+        if let Ok(mut a) = self.atlases.lock() {
+            a.clear();
         }
         if let Ok(mut p) = self.pool.lock() {
             p.clear();
