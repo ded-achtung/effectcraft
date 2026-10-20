@@ -757,6 +757,31 @@ fn within_memory_returns_the_work_when_there_is_room() {
     assert_eq!((img.width, img.height), (64, 32));
 }
 
+/// #1812: a texture whose allocation failed is invalid, and using it is a validation error. Inside
+/// the guard it fails that work only (the frame renders on the CPU); the context stays healthy
+/// for the next frames instead of retiring for the session.
+#[test]
+fn within_memory_catches_the_use_of_a_failed_texture() {
+    let Some(g) = gpu() else { return };
+    let w = g.ctx.max_dim + 1;
+    let failed = g.within_memory(|| {
+        let t = g.ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        t.create_view(&Default::default());
+    });
+    assert!(failed.is_err(), "the failed texture is reported to the caller");
+    assert!(g.ctx.check_health().is_ok(), "the context is still usable");
+    assert!(g.within_memory(|| g.ctx.image(64, 32)).is_ok());
+}
+
 /// A buffer whose allocation fails (here: over the device's buffer size limit; on Adreno an
 /// internal `ERROR_INITIALIZATION_FAILED`) is reported to the caller's error scope instead of
 /// panicking in `create_buffer_init`'s mapped range on a frame thread (#591).
